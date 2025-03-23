@@ -1,3 +1,4 @@
+#!/bin/bash
 # Copyright 2013-2014 Amazon.com, Inc. or its affiliates. All Rights Reserved. 
 #
 # Licensed under the Apache License, Version 2.0 (the "License"). You may not
@@ -11,6 +12,4 @@
 # KIND, either express or implied. See the License for the specific language 
 # governing permissions and limitations under the License.
 
-#!/bin/bash
-
-nohup python worker.py my-first-stream --sleep_interval 0.1 --worker_time 345600 --partition_key Kinesis01 > 01worker.out 2> 01worker.err < /dev/null &
+nohup python3 worker.py my-first-stream --sleep_interval 0.1 --worker_time 345600 > 01worker.out 2> 01worker.err < /dev/null &

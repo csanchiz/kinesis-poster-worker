@@ -11,53 +11,51 @@
 # KIND, either express or implied. See the License for the specific language
 # governing permissions and limitations under the License.
 
-from __future__ import print_function
-
-import boto
+import boto3
 import argparse
 import json
 import threading
 import time
 import datetime
+import random
+import string
 
 from argparse import RawTextHelpFormatter
-from random import choice
-from string import lowercase
-from boto.kinesis.exceptions import ResourceNotFoundException
+from botocore.exceptions import ClientError
 
-# To preclude inclusion of aws keys into this code, you may temporarily add
-# your AWS credentials to the file:
-#     ~/.boto
-# as follows:
-#     [Credentials]
-#     aws_access_key_id = <your access key>
-#     aws_secret_access_key = <your secret key>
+# To preclude inclusion of aws keys into this code, you can configure your AWS credentials
+# using the AWS CLI:
+#     $ aws configure
+# or by setting environment variables:
+#     AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN (optional)
 
-make_string = lambda x: "".join(choice(lowercase) for i in range(x))
+def make_string(length):
+    """Generate a random string of lowercase letters with the given length."""
+    return "".join(random.choice(string.ascii_lowercase) for i in range(length))
 
-def get_or_create_stream(stream_name, shard_count):
+def get_or_create_stream(kinesis_client, stream_name, shard_count):
+    """Get or create a Kinesis stream with the given name and shard count."""
     stream = None
     try:
-        stream = kinesis.describe_stream(stream_name)
-        print (json.dumps(stream, sort_keys=True, indent=2,
+        stream = kinesis_client.describe_stream(StreamName=stream_name)
+        print(json.dumps(stream, sort_keys=True, indent=2,
             separators=(',', ': ')))
-    except ResourceNotFoundException as rnfe:
+    except kinesis_client.exceptions.ResourceNotFoundException:
         while (stream is None) or ('ACTIVE' not in stream['StreamDescription']['StreamStatus']):
             if stream is None:
-                print ('Could not find ACTIVE stream:{0} trying to create.'.format(
+                print('Could not find ACTIVE stream:{0} trying to create.'.format(
                     stream_name))
-                kinesis.create_stream(stream_name, shard_count)
+                kinesis_client.create_stream(StreamName=stream_name, ShardCount=shard_count)
             else:
-                print ("Stream status: %s" % stream['StreamDescription']['StreamStatus'])
+                print("Stream status: %s" % stream['StreamDescription']['StreamStatus'])
             time.sleep(1)
-            stream = kinesis.describe_stream(stream_name)
+            stream = kinesis_client.describe_stream(StreamName=stream_name)
 
     return stream
 
 
 def sum_posts(kinesis_actors):
-    """Sum all posts across an array of KinesisPosters
-    """
+    """Sum all posts across an array of KinesisPosters"""
     total_records = 0
     for actor in kinesis_actors:
         total_records += actor.total_records
@@ -68,11 +66,12 @@ class KinesisPoster(threading.Thread):
     """The Poster thread that repeatedly posts records to shards in a given
     Kinesis stream.
     """
-    def __init__(self, stream_name, partition_key, poster_time=30, quiet=False,
+    def __init__(self, kinesis_client, stream_name, partition_key, poster_time=30, quiet=False,
                  name=None, group=None, filename=None, args=(), kwargs={}):
         super(KinesisPoster, self).__init__(name=name, group=group,
                                             args=args, kwargs=kwargs)
         self._pending_records = []
+        self.kinesis_client = kinesis_client
         self.stream_name = stream_name
         self.partition_key = partition_key
         self.quiet = quiet
@@ -90,10 +89,9 @@ class KinesisPoster(threading.Thread):
                 self.file_contents = content_file.read(40000)
 
     def add_records(self, records):
-        """ Add given records to the Poster's pending records list.
-        """
+        """ Add given records to the Poster's pending records list."""
         print('~> adding records:{0}'.format(records))
-        if len(records) is 1:
+        if len(records) == 1:
             self._pending_records.extend(records[0])
         else:
             self._pending_records.extend(records)
@@ -107,22 +105,25 @@ class KinesisPoster(threading.Thread):
         return len(precs)
 
     def put_file_contents(self):
+        """Put file contents as a record in the Kinesis stream."""
         if self.file_contents:
-            response = kinesis.put_record(
-                stream_name=self.stream_name,
-                data=self.file_contents, partition_key=self.partition_key)
+            response = self.kinesis_client.put_record(
+                StreamName=self.stream_name,
+                Data=self.file_contents,
+                PartitionKey=self.partition_key)
             self.total_records += 1
             if self.quiet is False:
-                print ("-= put seqNum:", response['SequenceNumber'])
+                print("-= put seqNum:", response['SequenceNumber'])
 
     def put_records(self, records):
         """Put the given records in the Kinesis stream."""
         for record in records:
-            response = kinesis.put_record(
-                stream_name=self.stream_name,
-                data=record, partition_key=self.partition_key)
+            response = self.kinesis_client.put_record(
+                StreamName=self.stream_name,
+                Data=record,
+                PartitionKey=self.partition_key)
             if self.quiet is False:
-                print ("-= put seqNum:", response['SequenceNumber'])
+                print("-= put seqNum:", response['SequenceNumber'])
 
     def run(self):
         start = datetime.datetime.now()
@@ -166,27 +167,31 @@ the stream [default: 30]''')
 
     threads = []
     args = parser.parse_args()
-    kinesis = boto.kinesis.connect_to_region(region_name = args.region)
+    
+    # Create a boto3 Kinesis client
+    kinesis = boto3.client('kinesis', region_name=args.region)
+    
     if (args.delete_stream):
         # delete the given Kinesis stream name
-        kinesis.delete_stream(stream_name=args.stream_name)
+        kinesis.delete_stream(StreamName=args.stream_name)
     else:
         start_time = datetime.datetime.now()
 
         if args.describe_only is True:
             # describe the given Kinesis stream name
-            stream = kinesis.describe_stream(args.stream_name)
-            print (json.dumps(stream, sort_keys=True, indent=2,
+            stream = kinesis.describe_stream(StreamName=args.stream_name)
+            print(json.dumps(stream, sort_keys=True, indent=2,
                 separators=(',', ': ')))
         else:
-            stream = get_or_create_stream(args.stream_name, args.shard_count)
+            stream = get_or_create_stream(kinesis, args.stream_name, args.shard_count)
             # Create a KinesisPoster thread up to the poster_count value
-            for pid in xrange(args.poster_count):
+            for pid in range(args.poster_count):
                 # create poster name per poster thread
                 poster_name = 'shard_poster:%s' % pid
                 # create partition key per poster thread
                 part_key = args.partition_key + '-' + str(pid)
                 poster = KinesisPoster(
+                    kinesis_client=kinesis,
                     stream_name=args.stream_name,
                     partition_key=part_key,  # poster's partition key
                     poster_time=args.poster_time,
@@ -195,7 +200,7 @@ the stream [default: 30]''')
                     quiet=args.quiet)
                 poster.daemon = True
                 threads.append(poster)
-                print ('starting: ', poster_name)
+                print('starting: ', poster_name)
                 poster.start()
 
             # Wait for all threads to complete
@@ -205,7 +210,7 @@ the stream [default: 30]''')
         finish_time = datetime.datetime.now()
         duration = (finish_time - start_time).total_seconds()
         total_records = sum_posts(threads)
-        print ("-=> Exiting Poster Main <=-")
-        print ("  Total Records:", total_records)
-        print ("     Total Time:", duration)
-        print ("  Records / sec:", total_records / duration)
+        print("-=> Exiting Poster Main <=-")
+        print("  Total Records:", total_records)
+        print("     Total Time:", duration)
+        print("  Records / sec:", total_records / duration)

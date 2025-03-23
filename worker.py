@@ -11,11 +11,9 @@
 # KIND, either express or implied. See the License for the specific language
 # governing permissions and limitations under the License.
 
-from __future__ import print_function
-
 import sys
 import re
-import boto
+import boto3
 import argparse
 import json
 import threading
@@ -23,18 +21,15 @@ import time
 import datetime
 
 from argparse import RawTextHelpFormatter
-from boto.kinesis.exceptions import ProvisionedThroughputExceededException
+from botocore.exceptions import ClientError
 import poster
 
-# To preclude inclusion of aws keys into this code, you may temporarily add
-# your AWS credentials to the file:
-#     ~/.boto
-# as follows:
-#     [Credentials]
-#     aws_access_key_id = <your access key>
-#     aws_secret_access_key = <your secret key>
+# To preclude inclusion of aws keys into this code, you can configure your AWS credentials
+# using the AWS CLI:
+#     $ aws configure
+# or by setting environment variables:
+#     AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN (optional)
 
-#kinesis = boto.connect_kinesis()
 iter_type_at = 'AT_SEQUENCE_NUMBER'
 iter_type_after = 'AFTER_SEQUENCE_NUMBER'
 iter_type_trim = 'TRIM_HORIZON'
@@ -44,27 +39,30 @@ EGG_PATTERN = re.compile('egg')
 
 
 def find_eggs(records):
+    """Find occurrences of 'egg' in the records."""
     for record in records:
-        text = record['Data'].lower()
+        text = record['Data'].decode('utf-8').lower()
         locs = [m.start() for m in EGG_PATTERN.finditer(text)]
         if len(locs) > 0:
-            print ('+--> egg location:', locs, '<--+')
+            print('+--> egg location:', locs, '<--+')
 
 
 def echo_records(records):
+    """Echo the records to the console."""
     for record in records:
-        text = record['Data']
+        text = record['Data'].decode('utf-8')
         print('+--> echo record:\n{0}'.format(text))
 
 
 class KinesisWorker(threading.Thread):
     """The Worker thread that repeatedly gets records from a given Kinesis
     stream."""
-    def __init__(self, stream_name, shard_id, iterator_type,
+    def __init__(self, kinesis_client, stream_name, shard_id, iterator_type,
                  worker_time=30, sleep_interval=0.5,
                  name=None, group=None, echo=False, args=(), kwargs={}):
         super(KinesisWorker, self).__init__(name=name, group=group,
                                           args=args, kwargs=kwargs)
+        self.kinesis_client = kinesis_client
         self.stream_name = stream_name
         self.shard_id = str(shard_id)
         self.iterator_type = iterator_type
@@ -75,22 +73,28 @@ class KinesisWorker(threading.Thread):
 
     def run(self):
         my_name = threading.current_thread().name
-        print ('+ KinesisWorker:', my_name)
-        print ('+-> working with iterator:', self.iterator_type)
-        response = kinesis.get_shard_iterator(self.stream_name,
-            self.shard_id, self.iterator_type)
+        print('+ KinesisWorker:', my_name)
+        print('+-> working with iterator:', self.iterator_type)
+        response = self.kinesis_client.get_shard_iterator(
+            StreamName=self.stream_name,
+            ShardId=self.shard_id,
+            ShardIteratorType=self.iterator_type
+        )
         next_iterator = response['ShardIterator']
-        print ('+-> getting next records using iterator:', next_iterator)
+        print('+-> getting next records using iterator:', next_iterator)
 
         start = datetime.datetime.now()
         finish = start + datetime.timedelta(seconds=self.worker_time)
         while finish > datetime.datetime.now():
             try:
-                response = kinesis.get_records(next_iterator, limit=25)
+                response = self.kinesis_client.get_records(
+                    ShardIterator=next_iterator,
+                    Limit=25
+                )
                 self.total_records += len(response['Records'])
 
                 if len(response['Records']) > 0:
-                    print ('\n+-> {1} Got {0} Worker Records'.format(
+                    print('\n+-> {1} Got {0} Worker Records'.format(
                         len(response['Records']), my_name))
                     if self.echo:
                         echo_records(response['Records'])
@@ -101,9 +105,10 @@ class KinesisWorker(threading.Thread):
                     sys.stdout.flush()
                 next_iterator = response['NextShardIterator']
                 time.sleep(self.sleep_interval)
-            except ProvisionedThroughputExceededException as ptee:
-                print (ptee.message)
+            except self.kinesis_client.exceptions.ProvisionedThroughputExceededException as ptee:
+                print(ptee)
                 time.sleep(5)
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
@@ -122,18 +127,22 @@ that hunt for the word "egg" in records from each shard.''',
         help='''the worker should turn off egg finding and just echo records to the console''')
 
     args = parser.parse_args()
-    kinesis = boto.kinesis.connect_to_region(region_name = args.region)
-    stream = kinesis.describe_stream(args.stream_name)
-    print (json.dumps(stream, sort_keys=True, indent=2, separators=(',', ': ')))
+    
+    # Create a boto3 Kinesis client
+    kinesis = boto3.client('kinesis', region_name=args.region)
+    
+    stream = kinesis.describe_stream(StreamName=args.stream_name)
+    print(json.dumps(stream, sort_keys=True, indent=2, separators=(',', ': ')))
     shards = stream['StreamDescription']['Shards']
-    print ('# Shard Count:', len(shards))
+    print('# Shard Count:', len(shards))
 
     threads = []
     start_time = datetime.datetime.now()
-    for shard_id in xrange(len(shards)):
+    for shard_id in range(len(shards)):
         worker_name = 'shard_worker:%s' % shard_id
-        print ('#-> shardId:', shards[shard_id]['ShardId'])
+        print('#-> shardId:', shards[shard_id]['ShardId'])
         worker = KinesisWorker(
+            kinesis_client=kinesis,
             stream_name=args.stream_name,
             shard_id=shards[shard_id]['ShardId'],
             # iterator_type=iter_type_trim,  # uses TRIM_HORIZON
@@ -145,7 +154,7 @@ that hunt for the word "egg" in records from each shard.''',
             )
         worker.daemon = True
         threads.append(worker)
-        print ('#-> starting: ', worker_name)
+        print('#-> starting: ', worker_name)
         worker.start()
 
     # Wait for all threads to complete
@@ -154,8 +163,8 @@ that hunt for the word "egg" in records from each shard.''',
     finish_time = datetime.datetime.now()
     duration = (finish_time - start_time).total_seconds()
     total_records = poster.sum_posts(threads)
-    print ("-=> Exiting Worker Main <=-")
-    print ("  Total Records:", total_records)
-    print ("     Total Time:", duration)
-    print ("  Records / sec:", total_records / duration)
-    print ("  Worker sleep interval:", args.sleep_interval)
+    print("-=> Exiting Worker Main <=-")
+    print("  Total Records:", total_records)
+    print("     Total Time:", duration)
+    print("  Records / sec:", total_records / duration)
+    print("  Worker sleep interval:", args.sleep_interval)

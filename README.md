@@ -16,9 +16,9 @@ multi-threaded load on a Kinesis stream.
 * * *
 ## Getting Started
 
-To get this example working with Python 3, first install boto3 using: 
+To get this example working with Python 3, first install the required dependencies:
 ```
-$ pip install boto3
+$ pip install -r requirements.txt
 ```
 
 Configure your AWS credentials using one of these methods:
@@ -54,6 +54,18 @@ the `my-first-stream` Kinesis stream.
 
 For detailed help and configuration options:
 ```python3 poster.py --help``` or ```python3 worker.py --help```, respectively.
+
+## Running Tests
+
+To run the unit tests:
+```
+$ ./run_tests.sh
+```
+
+Or manually:
+```
+$ python3 -m unittest discover -s tests
+```
 
 ## Related Resources
 * [Amazon Kinesis Developer Guide](http://docs.aws.amazon.com/kinesis/latest/dev/introduction.html)  
